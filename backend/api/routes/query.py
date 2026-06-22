@@ -298,14 +298,17 @@ async def detect_anomalies(
 async def get_history(
     limit: int = 20,
     offset: int = 0,
+    connection_id: Optional[str] = None,  # ADD THIS
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    query = select(QueryHistory).where(QueryHistory.user_id == current_user.id)
+    
+    if connection_id:  # ADD THIS
+        query = query.where(QueryHistory.connection_id == connection_id)
+    
     result = await db.execute(
-        select(QueryHistory)
-        .where(QueryHistory.user_id == current_user.id)
-        .order_by(QueryHistory.created_at.desc())
-        .limit(limit).offset(offset)
+        query.order_by(QueryHistory.created_at.desc()).limit(limit).offset(offset)
     )
     queries = result.scalars().all()
     return [{"id": str(q.id), "natural_language": q.natural_language, "generated_sql": q.generated_sql,

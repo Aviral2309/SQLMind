@@ -1,11 +1,10 @@
 """
-SQL Generator Agent — NL → SQL with schema-aware prompting
+SQL Generator Agent — NL to SQL with dialect-aware generation
 """
 from dataclasses import dataclass
 from typing import List, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 import structlog
-import sqlglot
 
 log = structlog.get_logger()
 
@@ -14,53 +13,27 @@ log = structlog.get_logger()
 class SQLGenerationResult:
     sql: str
     tokens_used: int
-    confidence: float
-    reasoning: str
+    confidence: float = 0.85
 
 
-SYSTEM_PROMPT = """You are an expert SQL query generator. Your job is to convert natural language questions into precise, optimized SQL queries.
+SYSTEM_PROMPT = """You are an expert SQL query generator. Convert natural language to precise SQL.
 
-Rules:
-1. Generate ONLY the SQL query — no explanation, no markdown, no backticks
-2. Use only tables and columns that exist in the provided schema
-3. Always add appropriate LIMIT clauses (default LIMIT 1000 unless aggregating)
-4. Use table aliases for readability
-5. Prefer CTEs over deeply nested subqueries for readability
-6. Never generate DROP, DELETE without WHERE, TRUNCATE, or ALTER TABLE
-7. For ambiguous requests, choose the most conservative interpretation
-8. Add comments in SQL for complex logic using -- notation
+CRITICAL RULES:
+1. Output ONLY the SQL query — no explanation, no markdown, no backticks around the whole query
+2. Use ONLY tables and columns that exist in the provided schema
+3. For MySQL: use backticks for column/table names with spaces: `column name`
+4. For PostgreSQL: use double quotes for names with spaces: "column name"  
+5. For SQLite: use double quotes for names with spaces: "column name"
+6. Always add LIMIT (default 100) unless aggregating
+7. Never generate DROP, DELETE without WHERE, TRUNCATE, ALTER TABLE
+8. If column has spaces, ALWAYS quote it with the right syntax for the dialect
 
-If you receive previous errors, fix them specifically."""
+DIALECT RULES:
+- mysql: backticks `name`, string concat with CONCAT(), LIMIT at end
+- postgres: double quotes "name", string concat with ||, LIMIT at end  
+- sqlite: double quotes "name", LIMIT at end
 
-FEW_SHOT_EXAMPLES = [
-    {
-        "nl": "Show me top 10 customers by total order value",
-        "sql": """SELECT 
-    c.customer_id,
-    c.name,
-    SUM(o.total_amount) AS total_order_value
-FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
-GROUP BY c.customer_id, c.name
-ORDER BY total_order_value DESC
-LIMIT 10;"""
-    },
-    {
-        "nl": "Find customers who haven't placed any orders in the last 90 days",
-        "sql": """SELECT 
-    c.customer_id,
-    c.name,
-    c.email,
-    MAX(o.created_at) AS last_order_date
-FROM customers c
-LEFT JOIN orders o ON c.customer_id = o.customer_id
-GROUP BY c.customer_id, c.name, c.email
-HAVING MAX(o.created_at) < NOW() - INTERVAL '90 days'
-    OR MAX(o.created_at) IS NULL
-ORDER BY last_order_date NULLS FIRST
-LIMIT 1000;"""
-    },
-]
+If previous attempt failed, fix the specific error mentioned."""
 
 
 class SQLGeneratorAgent:
@@ -76,20 +49,27 @@ class SQLGeneratorAgent:
         rag_chunks: List[dict] = None,
     ) -> SQLGenerationResult:
 
-        few_shot_text = self._format_few_shots(rag_chunks or [])
-        error_context = self._format_errors(previous_errors or [])
+        error_ctx = ""
+        if previous_errors:
+            error_ctx = f"\nPrevious attempt FAILED with these errors — fix them:\n" + \
+                       "\n".join(f"- {e}" for e in previous_errors) + "\n"
+
+        # Dialect-specific instructions
+        dialect_hint = {
+            "mysql": "Use MySQL syntax. Quote column/table names with SPACES using BACKTICKS like `column name`.",
+            "postgres": 'Use PostgreSQL syntax. Quote column/table names with SPACES using DOUBLE QUOTES like "column name".',
+            "sqlite": 'Use SQLite syntax. Quote column/table names with SPACES using DOUBLE QUOTES like "column name".',
+        }.get(db_type, "Use standard SQL.")
 
         user_prompt = f"""Database type: {db_type}
+{dialect_hint}
 
 Schema:
 {schema_context}
-
-{few_shot_text}
-{error_context}
-
+{error_ctx}
 Question: {natural_language}
 
-Generate the SQL query:"""
+Write the SQL query:"""
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
@@ -98,45 +78,34 @@ Generate the SQL query:"""
 
         response = await self.llm.ainvoke(messages)
         raw_sql = response.content.strip()
+        sql = self._clean_sql(raw_sql, db_type)
 
-        # Strip markdown code blocks if LLM included them
-        sql = self._clean_sql(raw_sql)
-
-        # Normalize with sqlglot
+        tokens_used = 0
         try:
-            parsed = sqlglot.parse_one(sql, dialect=db_type)
-            sql = parsed.sql(dialect=db_type, pretty=True)
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                tokens_used = response.usage_metadata.get("total_tokens", 0) or 0
         except Exception:
-            pass  # Use raw if parse fails — verifier will catch
+            pass
 
-        tokens_used = response.usage_metadata.get("total_tokens", 0) if hasattr(response, "usage_metadata") else 0
+        return SQLGenerationResult(sql=sql, tokens_used=tokens_used)
 
-        return SQLGenerationResult(
-            sql=sql,
-            tokens_used=tokens_used,
-            confidence=0.85,
-            reasoning="Generated from schema context and NL query",
-        )
-
-    def _clean_sql(self, raw: str) -> str:
-        """Remove markdown fences if LLM included them"""
-        if raw.startswith("```"):
+    def _clean_sql(self, raw: str, db_type: str) -> str:
+        # Remove markdown code blocks
+        if "```" in raw:
             lines = raw.split("\n")
             lines = [l for l in lines if not l.strip().startswith("```")]
-            return "\n".join(lines).strip()
-        return raw
+            raw = "\n".join(lines).strip()
 
-    def _format_few_shots(self, rag_chunks: List[dict]) -> str:
-        if not rag_chunks:
-            return ""
-        examples = "\nSimilar query examples:\n"
-        for chunk in rag_chunks[:3]:
-            if chunk.get("nl") and chunk.get("sql"):
-                examples += f"Q: {chunk['nl']}\nSQL: {chunk['sql']}\n\n"
-        return examples
+        # Remove leading/trailing whitespace
+        sql = raw.strip()
 
-    def _format_errors(self, errors: List[str]) -> str:
-        if not errors:
-            return ""
-        return f"\nPrevious attempt failed with these errors — fix them:\n" + \
-               "\n".join(f"- {e}" for e in errors) + "\n"
+        # Fix common dialect mistakes
+        if db_type == "mysql":
+            # Replace double quotes with backticks for identifiers in MySQL
+            # But be careful — only replace quoted identifiers, not string values
+            import re
+            # Replace "identifier" with `identifier` only when not in WHERE string context
+            sql = re.sub(r'(?<![=<>!\s])"([^"]+)"(?!\s*[,)]?\s*(?:FROM|WHERE|AND|OR|LIMIT|GROUP|ORDER|JOIN|ON|AS))',
+                        lambda m: f'`{m.group(1)}`', sql)
+
+        return sql

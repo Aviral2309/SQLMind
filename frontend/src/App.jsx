@@ -10,7 +10,16 @@ import ConnectionsPage from './pages/ConnectionsPage'
 import OptimizerPage from './pages/OptimizerPage'
 import ProfilePage from './pages/ProfilePage'
 
-const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 30000 } } })
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 60_000,      // use cached data for 60s — no blank flash on nav
+      gcTime: 5 * 60_000,     // keep in memory 5 min
+      refetchOnWindowFocus: false,  // don't refetch when switching tabs
+    },
+  },
+})
 
 function Protected({ children }) {
   const { token } = useAuthStore()

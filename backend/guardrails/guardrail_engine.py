@@ -1,16 +1,15 @@
 """
-Guardrail Engine — LLM input/output safety layer
+Guardrail Engine — input validation before LLM runs
 
 Detects:
-- Prompt injection attempts ("ignore previous instructions")
-- PII in user queries (Presidio-based)
-- Jailbreak patterns
-- Malicious SQL injection via NL
-- Off-topic requests (not database-related)
+- Non-database questions (pav bhaji, weather, jokes etc)
+- Prompt injection
+- SQL injection via NL
+- PII in queries
 """
 import re
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List
 import structlog
 
 log = structlog.get_logger()
@@ -20,131 +19,130 @@ log = structlog.get_logger()
 class GuardrailResult:
     blocked: bool
     reason: str
-    score: float  # 0.0 = safe, 1.0 = definitely malicious
+    score: float
     flags: List[str]
 
+
+# Must contain at least one of these to be database-related
+DB_KEYWORDS = [
+    "show", "find", "get", "fetch", "list", "count", "how many", "total",
+    "average", "sum", "top", "bottom", "recent", "latest", "oldest",
+    "filter", "where", "group", "order", "sort", "join", "table", "column",
+    "row", "record", "data", "database", "query", "select", "insert",
+    "update", "delete", "report", "analyze", "analysis", "compare",
+    "between", "range", "maximum", "minimum", "highest", "lowest",
+    "which", "who", "what", "when", "how much", "revenue", "sales",
+    "user", "customer", "order", "product", "employee", "transaction",
+    "date", "month", "year", "week", "today", "yesterday", "last",
+    "first", "all", "distinct", "unique", "duplicate", "null", "empty",
+    "percentage", "percent", "ratio", "trend", "growth", "decline",
+]
+
+# Clearly off-topic — no SQL relevance
+OFF_TOPIC_PATTERNS = [
+    r"\b(recipe|cook|bake|boil|fry|roast)\b",
+    r"\b(pav bhaji|biryani|pizza|burger|pasta|food|eat|drink)\b",
+    r"\b(weather|temperature|rain|sunny|cloudy|forecast)\b",
+    r"\b(joke|funny|laugh|humor|meme)\b",
+    r"\b(movie|film|song|music|dance|actor|actress)\b",
+    r"\b(cricket|football|sport|match|game|play)\b",
+    r"\b(love|relationship|girlfriend|boyfriend|marry|marriage)\b",
+    r"\b(poem|story|essay|write me|tell me a)\b",
+    r"\b(translate|language|meaning of)\b",
+    r"\b(stock market|crypto|bitcoin|price of gold)\b",
+]
 
 INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?previous\s+instructions",
     r"forget\s+(everything|all|your|the)\s+(above|previous|instructions)",
-    r"you\s+are\s+now\s+a?n?\s+\w+",  # "you are now a DAN"
+    r"you\s+are\s+now\s+a",
     r"system\s*prompt",
     r"jailbreak",
+    r"override\s+(your|all)\s+(instructions|rules)",
+    r"disregard\s+(your|all|previous)",
     r"act\s+as\s+if",
     r"pretend\s+(you|to\s+be)",
-    r"override\s+(your|all)\s+(instructions|rules|guidelines)",
-    r"disregard\s+(your|all|previous)",
 ]
 
-SQL_INJECTION_VIA_NL = [
+SQL_INJECTION_NL = [
     r";\s*drop\s+table",
     r";\s*delete\s+from",
-    r"union\s+select",
-    r"1\s*=\s*1",
-    r"or\s+true",
+    r"union\s+select.*from",
+    r"\bor\s+1\s*=\s*1\b",
     r"--\s*$",
-]
-
-OFF_TOPIC_PATTERNS = [
-    r"\b(write\s+me\s+a\s+(poem|story|essay))\b",
-    r"\b(what\s+is\s+the\s+weather)\b",
-    r"\b(tell\s+me\s+a\s+joke)\b",
-    r"\b(translate\s+this\s+to)\b",
-]
-
-# Harmless SQL-related patterns to explicitly allow
-SQL_RELATED_KEYWORDS = [
-    "select", "find", "show", "list", "count", "average", "total",
-    "top", "bottom", "recent", "filter", "group", "join", "table",
-    "column", "row", "query", "database", "where", "order",
+    r"xp_cmdshell",
 ]
 
 
 class GuardrailEngine:
-    def __init__(self):
-        self._pii_analyzer = None  # Lazy load Presidio
 
     async def check_input(self, text: str) -> GuardrailResult:
-        """Full input guardrail check"""
         flags = []
         score = 0.0
+        text_lower = text.lower().strip()
 
-        text_lower = text.lower()
+        # 1. Too short / gibberish
+        if len(text_lower) < 3:
+            return GuardrailResult(
+                blocked=True,
+                reason="Query too short. Please ask a proper question about your data.",
+                score=1.0,
+                flags=["too_short"],
+            )
 
-        # 1. Prompt injection
-        injection_score, injection_flags = self._check_injection(text_lower)
-        flags.extend(injection_flags)
-        score = max(score, injection_score)
-
-        # 2. SQL injection via NL
-        sqli_score, sqli_flags = self._check_sql_injection_nl(text_lower)
-        flags.extend(sqli_flags)
-        score = max(score, sqli_score)
-
-        # 3. Off-topic check
-        if self._is_off_topic(text_lower):
-            flags.append("off_topic")
-            score = max(score, 0.7)
-
-        # 4. Length check
-        if len(text) > 2000:
-            flags.append("excessive_length")
-            score = max(score, 0.3)
-
-        # 5. PII detection (async, only if enabled)
-        try:
-            pii_flags = await self._check_pii(text)
-            flags.extend(pii_flags)
-            if pii_flags:
-                score = max(score, 0.4)
-        except Exception:
-            pass  # Don't block if PII check fails
-
-        blocked = score >= 0.7
-        reason = ", ".join(flags) if flags else "clean"
-
-        log.info("guardrail_check", blocked=blocked, score=score, flags=flags)
-
-        return GuardrailResult(
-            blocked=blocked,
-            reason=reason,
-            score=score,
-            flags=flags,
-        )
-
-    def _check_injection(self, text: str):
-        flags = []
+        # 2. Prompt injection
         for pattern in INJECTION_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
-                flags.append(f"injection_pattern:{pattern[:30]}")
-        score = min(len(flags) * 0.4, 1.0)
-        return score, flags
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                flags.append("prompt_injection")
+                score = max(score, 0.95)
+                break
 
-    def _check_sql_injection_nl(self, text: str):
-        flags = []
-        for pattern in SQL_INJECTION_VIA_NL:
-            if re.search(pattern, text, re.IGNORECASE):
-                flags.append(f"sql_injection_nl:{pattern[:30]}")
-        score = min(len(flags) * 0.5, 1.0)
-        return score, flags
+        # 3. SQL injection via NL
+        for pattern in SQL_INJECTION_NL:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                flags.append("sql_injection")
+                score = max(score, 0.9)
+                break
 
-    def _is_off_topic(self, text: str) -> bool:
-        """Check if query is clearly not database-related"""
-        has_sql_keyword = any(kw in text for kw in SQL_RELATED_KEYWORDS)
-        has_off_topic = any(
-            re.search(p, text, re.IGNORECASE) for p in OFF_TOPIC_PATTERNS
-        )
-        return has_off_topic and not has_sql_keyword
+        # 4. Off-topic check — only block if clearly off-topic AND no DB keywords
+        has_db_keyword = any(kw in text_lower for kw in DB_KEYWORDS)
+        is_off_topic = any(re.search(p, text_lower, re.IGNORECASE) for p in OFF_TOPIC_PATTERNS)
 
-    async def _check_pii(self, text: str) -> List[str]:
-        """Presidio-based PII detection"""
-        try:
-            from presidio_analyzer import AnalyzerEngine
-            if self._pii_analyzer is None:
-                self._pii_analyzer = AnalyzerEngine()
+        if is_off_topic and not has_db_keyword:
+            flags.append("off_topic")
+            score = max(score, 0.85)
 
-            results = self._pii_analyzer.analyze(text=text, language="en")
-            pii_types = [r.entity_type for r in results if r.score > 0.7]
-            return [f"pii:{t}" for t in pii_types]
-        except ImportError:
-            return []
+        # 5. No DB context at all — generic questions
+        if not has_db_keyword and not flags and len(text_lower.split()) > 2:
+            # Check if it looks like a general knowledge question
+            general_starters = [
+                "what is", "who is", "how to make", "how to cook",
+                "explain", "tell me about", "what are", "define",
+                "why is", "when was", "where is",
+            ]
+            is_general = any(text_lower.startswith(s) for s in general_starters)
+            if is_general:
+                flags.append("general_knowledge")
+                score = max(score, 0.8)
+
+        blocked = score >= 0.75
+
+        if blocked:
+            reason = self._get_reason(flags)
+        else:
+            reason = "clean"
+
+        log.info("guardrail_check", blocked=blocked, score=round(score, 2), flags=flags)
+
+        return GuardrailResult(blocked=blocked, reason=reason, score=score, flags=flags)
+
+    def _get_reason(self, flags: List[str]) -> str:
+        if "prompt_injection" in flags:
+            return "I can only answer questions about your database data."
+        if "sql_injection" in flags:
+            return "This looks like a SQL injection attempt. Please ask a normal data question."
+        if "off_topic" in flags:
+            return "I can only help with questions about your database. Try asking something like: 'Show me the top 10 customers' or 'How many orders were placed this month?'"
+        if "general_knowledge" in flags:
+            return "I'm a database assistant — I can only answer questions about your data. Ask me something like: 'What are the total sales?' or 'Show recent orders.'"
+        return "Please ask a question related to your database data."
