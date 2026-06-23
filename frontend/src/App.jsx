@@ -9,14 +9,15 @@ import HistoryPage from './pages/HistoryPage'
 import ConnectionsPage from './pages/ConnectionsPage'
 import OptimizerPage from './pages/OptimizerPage'
 import ProfilePage from './pages/ProfilePage'
+import InsightsPage from './pages/InsightsPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: 1,
-      staleTime: 60_000,      // use cached data for 60s — no blank flash on nav
-      gcTime: 5 * 60_000,     // keep in memory 5 min
-      refetchOnWindowFocus: false,  // don't refetch when switching tabs
+      staleTime: 60_000,
+      gcTime: 5 * 60_000,
+      refetchOnWindowFocus: false,
     },
   },
 })
@@ -43,6 +44,7 @@ export default function App() {
           <Route path="/history" element={<Protected><HistoryPage /></Protected>} />
           <Route path="/connections" element={<Protected><ConnectionsPage /></Protected>} />
           <Route path="/optimizer" element={<Protected><OptimizerPage /></Protected>} />
+          <Route path="/insights" element={<Protected><InsightsPage /></Protected>} />
           <Route path="/profile" element={<Protected><ProfilePage /></Protected>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
