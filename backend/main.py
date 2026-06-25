@@ -1,6 +1,4 @@
-"""
-SQLMind — FastAPI Application
-"""
+"""SQLMind v2 — FastAPI Application"""
 from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
@@ -15,13 +13,13 @@ from db.redis_client import init_redis, close_redis
 from api.routes import auth, query, schema, history, eval_routes, health
 from api.routes.file_routes import router as file_router
 from api.routes.insights import router as insights_router
+from api.routes.dashboard import router as dashboard_router
 from api.middleware.rate_limit import RateLimitMiddleware
 from api.middleware.request_id import RequestIDMiddleware
 from api.websocket.endpoints import ws_router
 
 setup_logging()
 log = structlog.get_logger()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,13 +32,7 @@ async def lifespan(app: FastAPI):
     await close_db()
     await close_redis()
 
-
-app = FastAPI(
-    title="SQLMind API",
-    description="Agentic Text-to-SQL Data Intelligence Platform",
-    version="2.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="SQLMind API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -58,5 +50,5 @@ app.include_router(schema.router, prefix="/api/v1/schema", tags=["schema"])
 app.include_router(history.router, prefix="/api/v1/history", tags=["history"])
 app.include_router(file_router, prefix="/api/v1/files", tags=["files"])
 app.include_router(insights_router, prefix="/api/v1/insights", tags=["insights"])
+app.include_router(dashboard_router, prefix="/api/v1/dashboard", tags=["dashboard"])
 app.include_router(ws_router)
-app.include_router(eval_routes.router, prefix="/api/v1/eval", tags=["eval"])

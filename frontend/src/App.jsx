@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useAuthStore } from './stores/authStore'
+import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
@@ -10,6 +11,7 @@ import ConnectionsPage from './pages/ConnectionsPage'
 import OptimizerPage from './pages/OptimizerPage'
 import ProfilePage from './pages/ProfilePage'
 import InsightsPage from './pages/InsightsPage'
+import DashboardBuilderPage from './pages/DashboardBuilderPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,6 +38,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <Routes>
+          <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<Public><LoginPage /></Public>} />
           <Route path="/register" element={<Public><RegisterPage /></Public>} />
           <Route path="/dashboard" element={<Protected><DashboardPage /></Protected>} />
@@ -45,8 +48,9 @@ export default function App() {
           <Route path="/connections" element={<Protected><ConnectionsPage /></Protected>} />
           <Route path="/optimizer" element={<Protected><OptimizerPage /></Protected>} />
           <Route path="/insights" element={<Protected><InsightsPage /></Protected>} />
+          <Route path="/builder" element={<Protected><DashboardBuilderPage /></Protected>} />
           <Route path="/profile" element={<Protected><ProfilePage /></Protected>} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </QueryClientProvider>
